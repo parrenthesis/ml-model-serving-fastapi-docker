@@ -1,0 +1,12 @@
+version: "3.9"
+services:
+  api:
+    build:
+      context: .
+    image: housing-api:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_DIR=/app/model
+      - DATA_DIR=/app/data
+    restart: unless-stopped

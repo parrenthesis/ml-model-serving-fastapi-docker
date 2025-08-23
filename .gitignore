@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Env
+.venv/
+.env
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# Docker
+*.log
+
+# pngs
+phData.png
+
+# Docs
+Initial_README.md
+
+# Data
+data/kc_house_data.csv

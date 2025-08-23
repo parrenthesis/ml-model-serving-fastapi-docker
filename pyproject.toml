@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "phdata-housing-api"
+version = "0.1.0"
+description = "Real estate price prediction API and model training"
+authors = ["parrenthesis <noreply@example.com>"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pandas = "2.1.1"
+scikit-learn = "1.3.1"
+numpy = ">=1.26,<3"
+fastapi = ">=0.112,<1"
+uvicorn = { version = ">=0.29,<1", extras = ["standard"] }
+python-dotenv = ">=1.0.1"
+xgboost = { version = ">=2.0,<3", optional = true }
+
+[tool.poetry.extras]
+xgb = ["xgboost"]
+
+[tool.poetry.group.dev.dependencies]
+requests = "^2.32.3"
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"

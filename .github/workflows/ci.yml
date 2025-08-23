@@ -1,0 +1,23 @@
+name: ci
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t housing-api:ci .
+      - name: Run container
+        run: docker run -d -p 8000:8000 --name api housing-api:ci
+      - name: Wait and smoke test
+        run: |
+          sleep 3
+          curl -sf http://localhost:8000/healthz
+          curl -sf http://localhost:8000/readyz
+      - name: Stop
+        if: always()
+        run: docker rm -f api || true
