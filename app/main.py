@@ -8,11 +8,12 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Sequence
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ConfigDict
 import pickle
 
 APP_DIR = Path(__file__).resolve().parent
@@ -27,33 +28,80 @@ MODEL_FEATURES: List[str] = []
 DEMOGRAPHICS: Optional[pd.DataFrame] = None
 METRICS: Optional[Dict[str, Any]] = None
 
-# Minimal sales fields expected from clients when using /predict_minimal.
-# Any additional sales fields sent to /predict are accepted but ignored
-# unless they exist in model_features.json.
-SALE_FEATURES_REQUIRED: List[str] = [
-	"bedrooms",
-	"bathrooms",
-	"sqft_living",
-	"sqft_lot",
-	"floors",
-	"sqft_above",
-	"sqft_basement",
-	"zipcode",
-]
+# Type alias for clarity: acceptable containers for feature name lists
+FeatureNames = Sequence[str]
+
+# Input policy for handling extra fields on full-schema requests: allow|ignore|forbid
+INPUT_EXTRA_POLICY = os.getenv("INPUT_EXTRA_POLICY", "allow").lower()
+if INPUT_EXTRA_POLICY not in {"allow", "ignore", "forbid"}:
+	INPUT_EXTRA_POLICY = "allow"
+
+
+class SaleMinimal(BaseModel):
+	"""Minimal fields the model needs from the sales file.
+
+	The service will enrich these with demographics and align to
+	model_features.json before prediction.
+	"""
+	bedrooms: int
+	bathrooms: float
+	sqft_living: int
+	sqft_lot: int
+	floors: float
+	sqft_above: int
+	sqft_basement: int
+	zipcode: str = Field(..., pattern=r"^\d{5}$")
+
+
+class _SaleFullBase(BaseModel):
+	"""Base full-schema input matching future_unseen_examples.csv."""
+	bedrooms: int
+	bathrooms: float
+	sqft_living: int
+	sqft_lot: int
+	floors: float
+	waterfront: int
+	view: int
+	condition: int
+	grade: int
+	sqft_above: int
+	sqft_basement: int
+	yr_built: int
+	yr_renovated: int
+	zipcode: str = Field(..., pattern=r"^\d{5}$")
+	lat: float
+	long: float
+	sqft_living15: int
+	sqft_lot15: int
+
+
+class SaleFullAllow(_SaleFullBase):
+	model_config = ConfigDict(extra='allow')
+
+
+class SaleFullIgnore(_SaleFullBase):
+	model_config = ConfigDict(extra='ignore')
+
+
+class SaleFullForbid(_SaleFullBase):
+	model_config = ConfigDict(extra='forbid')
+
+
+# Alias selected by env for endpoint typing/validation
+SaleFull = (
+	SaleFullAllow if INPUT_EXTRA_POLICY == "allow" else
+	SaleFullIgnore if INPUT_EXTRA_POLICY == "ignore" else
+	SaleFullForbid
+)
+
 
 class PredictResponse(BaseModel):
-	"""Single prediction payload with optional metadata for client transparency."""
+	"""Lean prediction payload."""
 	prediction: float
-	metadata: Dict[str, Any]
 
 
 class BatchPredictResponse(BaseModel):
-	"""Batch container for predictions.
-
-	Using a batch wrapper provides a consistent response structure whether a
-	single record or multiple records are submitted, and allows efficient
-	bulk scoring without N round-trips.
-	"""
+	"""Batch container for predictions."""
 	predictions: List[PredictResponse]
 
 
@@ -114,7 +162,17 @@ def readyz() -> Dict[str, Any]:
 	}
 
 
-def _ensure_required_fields(df: pd.DataFrame, required: List[str]) -> None:
+@app.get("/metrics")
+def metrics() -> Dict[str, Any]:
+	"""Return model/service metrics and metadata without doing inference."""
+	return {
+		"metrics": METRICS or {},
+		"feature_count": len(MODEL_FEATURES) if MODEL_FEATURES else 0,
+		"algorithm": (METRICS or {}).get("algorithm"),
+	}
+
+
+def _ensure_required_fields(df: pd.DataFrame, required: FeatureNames) -> None:
 	"""Validate required fields are present; raise 422 with details if not."""
 	missing = [c for c in required if c not in df.columns]
 	if missing:
@@ -146,7 +204,7 @@ def _enrich_with_demographics(df: pd.DataFrame, demographics: pd.DataFrame) -> p
 	return merged
 
 
-def _align_to_model_features(df: pd.DataFrame, model_features: List[str]) -> pd.DataFrame:
+def _align_to_model_features(df: pd.DataFrame, model_features: FeatureNames) -> pd.DataFrame:
 	"""Filter and order columns to exactly match the training schema.
 
 	Any extra columns provided by clients are dropped here, and missing columns
@@ -169,60 +227,41 @@ def _predict_dataframe(df: pd.DataFrame) -> List[float]:
 
 
 @app.post("/predict", response_model=BatchPredictResponse)
-async def predict(payload: Union[Dict[str, Any], List[Dict[str, Any]]]) -> BatchPredictResponse:
-	"""Predict from full-schema payload(s).
-
-	Accept either a single JSON object or a list. Clients may send the entire
-	future_unseen_examples.csv shape; extra fields are tolerated and dropped
-	during alignment to model_features.json.
-	"""
-	records: List[Dict[str, Any]] = payload if isinstance(payload, list) else [payload]
+async def predict(payload: Union[SaleFull, List[SaleFull]]) -> BatchPredictResponse:
+	"""Predict from full-schema payload(s)."""
+	records: List[Dict[str, Any]] = (
+		[p.model_dump() for p in payload] if isinstance(payload, list) else [payload.model_dump()]
+	)
 	df = pd.DataFrame.from_records(records)
 
 	_ensure_required_fields(df, required=["zipcode"])  # at minimum need zipcode to enrich
 	enriched = _enrich_with_demographics(df, DEMOGRAPHICS)
-	aligned = _align_to_model_features(enriched, MODEL_FEATURES)
+	aligned = _align_to_model_features(enriched, MODEL_FEATURES) # pre-existing model_features.json
 
 	preds = _predict_dataframe(aligned)
-
-	responses: List[PredictResponse] = []
-	for pred in preds:
-		meta = {
-			"model_features": MODEL_FEATURES,
-			"num_features": len(MODEL_FEATURES)
-		}
-		responses.append(PredictResponse(prediction=pred, metadata=meta))
-
+	responses = [PredictResponse(prediction=p) for p in preds]
 	return BatchPredictResponse(predictions=responses)
 
 
 @app.post("/predict_minimal", response_model=BatchPredictResponse)
-async def predict_minimal(payload: Union[Dict[str, Any], List[Dict[str, Any]]]) -> BatchPredictResponse:
-	"""Predict from a minimal set of sales fields; server fills demographics.
-
-	This endpoint is optimized for manual entry or constrained clients. It
-	reaches the same final feature vector via demographics join + alignment.
-	"""
-	records: List[Dict[str, Any]] = payload if isinstance(payload, list) else [payload]
+async def predict_minimal(payload: Union[SaleMinimal, List[SaleMinimal]]) -> BatchPredictResponse:
+	"""Predict from a minimal set of sales fields; server fills demographics."""
+	records: List[Dict[str, Any]] = (
+		[p.model_dump() for p in payload] if isinstance(payload, list) else [payload.model_dump()]
+	)
 	df = pd.DataFrame.from_records(records)
 
-	_ensure_required_fields(df, required=SALE_FEATURES_REQUIRED)
+	# Derive minimal required field names from the Pydantic model
+	minimal_fields = list(SaleMinimal.model_fields.keys())
+	_ensure_required_fields(df, required=minimal_fields)
 
-	df_sale_only = df[SALE_FEATURES_REQUIRED]
+	df_sale_only = df[minimal_fields] 
 	enriched = _enrich_with_demographics(df_sale_only, DEMOGRAPHICS)
-	aligned = _align_to_model_features(enriched, MODEL_FEATURES)
+	aligned = _align_to_model_features(enriched, MODEL_FEATURES) # pre-existing model_features.json
 
-	preds = _predict_dataframe(aligned)
-
-	responses: List[PredictResponse] = []
-	for pred in preds:
-		meta = {
-			"model_features": MODEL_FEATURES,
-			"num_features": len(MODEL_FEATURES)
-		}
-		responses.append(PredictResponse(prediction=pred, metadata=meta))
-
-	return BatchPredictResponse(predictions=responses)
+	preds = _predict_dataframe(aligned) 
+	responses = [PredictResponse(prediction=p) for p in preds] 
+	return BatchPredictResponse(predictions=responses) 
 
 
 @app.exception_handler(Exception)

@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   api:
     build:
@@ -9,4 +8,5 @@ services:
     environment:
       - MODEL_DIR=/app/model
       - DATA_DIR=/app/data
+      - INPUT_EXTRA_POLICY=allow
     restart: unless-stopped

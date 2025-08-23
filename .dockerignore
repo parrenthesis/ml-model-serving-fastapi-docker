@@ -1,0 +1,11 @@
+.git
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+.ipynb_checkpoints/
+# Large training data we don't copy into images by default
+# Keep zipcode/future examples for runtime; kc_house_data.csv excluded
+kc_house_data.csv

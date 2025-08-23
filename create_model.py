@@ -15,7 +15,6 @@ from sklearn import neighbors
 from sklearn import pipeline
 from sklearn import preprocessing
 from sklearn import metrics
-import numpy as np
 
 SALES_PATH = "data/kc_house_data.csv"  # path to CSV with home sale data
 DEMOGRAPHICS_PATH = "data/zipcode_demographics.csv"  # path to CSV with demographics
