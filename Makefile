@@ -1,30 +1,35 @@
+.PHONY: train train-xgb api test-api docker-build up down health ci-smoke help
+
 PY=poetry run
 
-train:
+train: ## Train KNN model and write artifacts to model/
 	$(PY) python create_model.py
 
-train-xgb:
+train-xgb: ## Train XGBoost model (requires xgboost) and write artifacts
 	$(PY) python create_model.py --algo xgboost
 
-api:
+api: ## Run FastAPI locally with uvicorn
 	$(PY) uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-test-api:
+test-api: ## Post samples from future_unseen_examples.csv to /predict
 	$(PY) python tests/test_api.py
 
-docker-build:
+docker-build: ## Build Docker image locally
 	docker build -t housing-api:latest .
 
-up:
+up: ## Compose up (build and start container)
 	docker compose up --build -d
 
-down:
+down: ## Compose down (stop/remove container)
 	docker compose down
 
-health:
+health: ## Check healthz and readyz endpoints
 	curl -sf http://localhost:8000/healthz && echo && curl -sf http://localhost:8000/readyz
 
-ci-smoke: docker-build
+ci-smoke: docker-build ## Build, run, health check, and stop
 	docker run -d -p 8000:8000 --name api housing-api:latest
 	sleep 3 && curl -sf http://localhost:8000/healthz && curl -sf http://localhost:8000/readyz
 	docker rm -f api || true
+
+help: ## Show make targets
+	@grep -E '^[a-zA-Z_-]+:.*?## ' Makefile | sort | awk 'BEGIN {FS=":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
