@@ -54,9 +54,14 @@ curl -s -X POST http://localhost:8000/predict_minimal \
 
 ## Training
 - Run `python create_model.py` to produce `model/`:
-  - `model.pkl` (pipeline), `model_features.json` (training schema), `metrics.json` (R², RMSE, MAE, Median AE, sizes)
-- Default algorithm: KNN with `RobustScaler`
-- Optional: XGBoost with `--algo xgboost` (install `xgboost` first)
+  - `model.pkl` (pipeline), `model_features.json` (training schema), `metrics.json` (R², RMSE, MAE, Median AE, sizes; includes tuning info when used)
+- Algorithms:
+  - KNN with `RobustScaler` (default): `--algo knn`
+  - XGBoost (included): `--algo xgboost`
+- Tuning (cross‑validation):
+  - KNN tuned: `poetry run python create_model.py --algo knn --tune knn --cv-folds 5`
+  - XGB tuned: `poetry run python create_model.py --algo xgboost --tune xgb --cv-folds 5 --n-iter 30`
+- CPU limiting: set `--max-workers 2` or env `MAX_WORKERS=2` to cap parallelism.
 
 ## Configuration
 - `MODEL_DIR` (default `/app/model`) – where artifacts are loaded from
@@ -69,7 +74,7 @@ curl -s -X POST http://localhost:8000/predict_minimal \
 ## Dev commands (Makefile)
 ```bash
 make train        # train KNN
-make train-xgb    # train XGBoost (requires xgboost)
+make train-xgb    # train XGBoost
 make api          # run FastAPI locally
 make test-api     # post sample rows to /predict
 make docker-build # build image

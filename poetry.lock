@@ -315,7 +315,7 @@ files = [
 name = "nvidia-nccl-cu12"
 version = "2.27.7"
 description = "NVIDIA Collective Communication Library (NCCL) Runtime"
-optional = true
+optional = false
 python-versions = ">=3"
 files = [
     {file = "nvidia_nccl_cu12-2.27.7-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:4617839f3bb730c3845bf9adf92dbe0e009bc53ca5022ed941f2e23fb76e6f17"},
@@ -1142,7 +1142,7 @@ files = [
 name = "xgboost"
 version = "2.1.4"
 description = "XGBoost Python Package"
-optional = true
+optional = false
 python-versions = ">=3.8"
 files = [
     {file = "xgboost-2.1.4-py3-none-macosx_10_15_x86_64.macosx_11_0_x86_64.macosx_12_0_x86_64.whl", hash = "sha256:78d88da184562deff25c820d943420342014dd55e0f4c017cc4563c2148df5ee"},
@@ -1168,10 +1168,7 @@ plotting = ["graphviz", "matplotlib"]
 pyspark = ["cloudpickle", "pyspark", "scikit-learn"]
 scikit-learn = ["scikit-learn"]
 
-[extras]
-xgb = ["xgboost"]
-
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.11"
-content-hash = "d7dd758d110479e5ba4cf1a529ead90a6817cfe044698568c1894d526f64852a"
+content-hash = "782a7cbb12c27e415146b2903202245e51d6dd09bc16c048a4c1da92b0b74036"

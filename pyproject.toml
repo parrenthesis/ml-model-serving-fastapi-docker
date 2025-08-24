@@ -13,10 +13,7 @@ numpy = ">=1.26,<3"
 fastapi = ">=0.112,<1"
 uvicorn = { version = ">=0.29,<1", extras = ["standard"] }
 python-dotenv = ">=1.0.1"
-xgboost = { version = ">=2.0,<3", optional = true }
-
-[tool.poetry.extras]
-xgb = ["xgboost"]
+xgboost = ">=2.0,<3"
 
 [tool.poetry.group.dev.dependencies]
 requests = "^2.32.3"
