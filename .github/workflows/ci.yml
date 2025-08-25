@@ -15,8 +15,13 @@ jobs:
 
       - name: Discover project paths
         run: |
-          APP_DIR=$(git ls-files | grep '/Dockerfile$' | xargs dirname | head -n1)
+          APP_DIR=$(git ls-files | grep -E '.github/workflows/ci.yml$' | xargs -n1 dirname | xargs -n1 dirname | head -n1)
+          if [ -z "$APP_DIR" ]; then
+            APP_DIR=$(git ls-files | grep '/Dockerfile$' | xargs dirname | head -n1)
+          fi
+          if [ -z "$APP_DIR" ]; then APP_DIR=.; fi
           echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
+          echo "Resolved APP_DIR=$APP_DIR"
 
       # Skipping Python/Poetry test env setup; this workflow uses container smoke tests below
 
@@ -50,8 +55,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Discover project paths
         run: |
-          APP_DIR=$(git ls-files | grep '/Dockerfile$' | xargs dirname | head -n1)
+          APP_DIR=$(git ls-files | grep -E '.github/workflows/ci.yml$' | xargs -n1 dirname | xargs -n1 dirname | head -n1)
+          if [ -z "$APP_DIR" ]; then
+            APP_DIR=$(git ls-files | grep '/Dockerfile$' | xargs dirname | head -n1)
+          fi
+          if [ -z "$APP_DIR" ]; then APP_DIR=.; fi
           echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
+          echo "Resolved APP_DIR=$APP_DIR"
       - name: Build image
         working-directory: ${{ env.APP_DIR }}
         run: docker build -t housing-api:ci .
@@ -59,9 +69,8 @@ jobs:
         run: docker run -d -p 8000:8000 --name api housing-api:ci
       - name: Wait and smoke test
         run: |
-          sleep 3
-          curl -sf http://localhost:8000/healthz
-          curl -sf http://localhost:8000/readyz
+          for i in {1..15}; do curl -sf http://localhost:8000/healthz && break || sleep 1; done
+          curl -sf http://localhost:8000/readyz || (docker logs api && exit 1)
       - name: Stop
         if: always()
         run: docker rm -f api || true
