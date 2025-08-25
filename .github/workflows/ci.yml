@@ -15,11 +15,9 @@ jobs:
 
       - name: Discover project paths
         run: |
-          APP_DIR=$(git ls-files | grep -E '.github/workflows/ci.yml$' | xargs -n1 dirname | xargs -n1 dirname | head -n1)
-          if [ -z "$APP_DIR" ]; then
-            APP_DIR=$(git ls-files | grep '/Dockerfile$' | xargs dirname | head -n1)
-          fi
-          if [ -z "$APP_DIR" ]; then APP_DIR=.; fi
+          APP_DIR=$(git ls-files -z | xargs -0 -n1 | grep '/Dockerfile$' | head -n1 | xargs -I{} dirname {})
+          if [ -z "$APP_DIR" ]; then APP_DIR=$(dirname "$(find . -type f -name Dockerfile -print -quit)"); fi
+          if [ -z "$APP_DIR" ] || [ "$APP_DIR" = "." ]; then APP_DIR=$(pwd); fi
           echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
           echo "Resolved APP_DIR=$APP_DIR"
 
@@ -55,11 +53,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Discover project paths
         run: |
-          APP_DIR=$(git ls-files | grep -E '.github/workflows/ci.yml$' | xargs -n1 dirname | xargs -n1 dirname | head -n1)
-          if [ -z "$APP_DIR" ]; then
-            APP_DIR=$(git ls-files | grep '/Dockerfile$' | xargs dirname | head -n1)
-          fi
-          if [ -z "$APP_DIR" ]; then APP_DIR=.; fi
+          APP_DIR=$(git ls-files -z | xargs -0 -n1 | grep '/Dockerfile$' | head -n1 | xargs -I{} dirname {})
+          if [ -z "$APP_DIR" ]; then APP_DIR=$(dirname "$(find . -type f -name Dockerfile -print -quit)"); fi
+          if [ -z "$APP_DIR" ] || [ "$APP_DIR" = "." ]; then APP_DIR=$(pwd); fi
           echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
           echo "Resolved APP_DIR=$APP_DIR"
       - name: Build image
