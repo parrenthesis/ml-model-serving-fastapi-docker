@@ -18,23 +18,7 @@ jobs:
           APP_DIR=$(git ls-files | grep '/Dockerfile$' | xargs dirname | head -n1)
           echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Poetry
-        run: pipx install poetry
-
-      - name: Install deps
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          poetry env use 3.11
-          poetry install --no-root
-      
-      - name: API smoke test (no coverage gate)
-        working-directory: ${{ env.APP_DIR }}
-        run: poetry run pytest -q tests/test_api.py
+      # Skipping Python/Poetry test env setup; this workflow uses container smoke tests below
 
       - name: Build Docker image
         working-directory: ${{ env.APP_DIR }}
@@ -56,6 +40,7 @@ jobs:
         if: ${{ always() }}
         working-directory: ${{ env.APP_DIR }}
         run: |
+          docker image inspect housing-api:ci >/dev/null 2>&1 || docker build -t housing-api:ci .
           VERSION=$(jq -r '.model_version // .algorithm' model/metrics.json || echo "dev")
           docker tag housing-api:ci housing-api:${VERSION}
 
