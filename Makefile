@@ -5,8 +5,14 @@ PY=poetry run
 train: ## Train KNN model and write artifacts to model/
 	$(PY) python create_model.py
 
+train-knn-tuned: ## Train KNN with CV tuning and write artifacts
+	$(PY) python create_model.py --algo knn --tune knn --cv-folds 5
+
 train-xgb: ## Train XGBoost model (requires xgboost) and write artifacts
 	$(PY) python create_model.py --algo xgboost
+
+train-xgb-tuned: ## Train XGBoost with CV tuning and write artifacts
+	$(PY) python create_model.py --algo xgboost --tune xgb --cv-folds 5 --n-iter 30
 
 api: ## Run FastAPI locally with uvicorn
 	$(PY) uvicorn app.main:app --host 0.0.0.0 --port 8000
