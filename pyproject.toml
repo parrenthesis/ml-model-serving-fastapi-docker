@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "phdata-housing-api"
+name = "housing-api"
 version = "0.1.0"
 description = "Real estate price prediction API and model training"
 authors = ["parrenthesis <noreply@example.com>"]

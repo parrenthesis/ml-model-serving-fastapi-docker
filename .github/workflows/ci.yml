@@ -1,15 +1,76 @@
 name: ci
+
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
+
 jobs:
+  build-test-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Discover project paths
+        run: |
+          TESTS_DIR=$(git ls-files | grep '/tests/Makefile' | xargs dirname | head -n1)
+          APP_DIR=$(git ls-files | grep '/Dockerfile$' | xargs dirname | head -n1)
+          echo "TESTS_DIR=$TESTS_DIR" >> $GITHUB_ENV
+          echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install deps (tests env)
+        working-directory: ${{ env.TESTS_DIR }}
+        run: |
+          poetry env use 3.11
+          poetry install --no-root
+
+      - name: Run tests with coverage gate
+        working-directory: ${{ env.TESTS_DIR }}
+        run: make test
+
+      - name: Build Docker image
+        working-directory: ${{ env.APP_DIR }}
+        run: docker build -t housing-api:ci .
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: 'housing-api:ci'
+          format: 'table'
+          exit-code: '0'
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Install jq for tagging
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Tag image with model version
+        if: ${{ always() }}
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          VERSION=$(jq -r '.model_version // .algorithm' model/metrics.json || echo "dev")
+          docker tag housing-api:ci housing-api:${VERSION}
+
   build-and-smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Discover project paths
+        run: |
+          APP_DIR=$(git ls-files | grep '/Dockerfile$' | xargs dirname | head -n1)
+          echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
       - name: Build image
+        working-directory: ${{ env.APP_DIR }}
         run: docker build -t housing-api:ci .
       - name: Run container
         run: docker run -d -p 8000:8000 --name api housing-api:ci

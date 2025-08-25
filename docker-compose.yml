@@ -9,4 +9,6 @@ services:
       - MODEL_DIR=/app/model
       - DATA_DIR=/app/data
       - INPUT_EXTRA_POLICY=allow
+      - WEB_CONCURRENCY=2
+      - RATE_LIMIT_PER_MINUTE=0
     restart: unless-stopped

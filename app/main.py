@@ -6,33 +6,58 @@
 #   (clients send zipcode; we join demographics here).
 import json
 import os
+import time
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from typing import Sequence
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.responses import JSONResponse
+try:
+	import orjson
+	from fastapi.responses import ORJSONResponse  # type: ignore
+	DefaultResponseClass = ORJSONResponse
+except Exception:
+	DefaultResponseClass = JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 import pickle
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
-DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT_DIR / "data")))
-MODEL_DIR = Path(os.getenv("MODEL_DIR", str(ROOT_DIR / "model")))
 
-app = FastAPI(title="Real Estate Price Prediction API", version="1.0.0")
+
+class Settings(BaseModel):
+	data_dir: Path = Path(os.getenv("DATA_DIR", str(ROOT_DIR / "data")))
+	model_dir: Path = Path(os.getenv("MODEL_DIR", str(ROOT_DIR / "model")))
+	input_extra_policy: str = os.getenv("INPUT_EXTRA_POLICY", "allow").lower()
+	api_keys: List[str] = [k.strip() for k in os.getenv("API_KEYS", "").split(",") if k.strip()]
+	rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "0"))
+	model_version: Optional[str] = os.getenv("MODEL_VERSION")
+
+
+SETTINGS = Settings()
+DATA_DIR = SETTINGS.data_dir
+MODEL_DIR = SETTINGS.model_dir
+
+app = FastAPI(
+	title="Real Estate Price Prediction API",
+	version="1.0.0",
+	default_response_class=DefaultResponseClass,
+)
 
 MODEL: Any = None
 MODEL_FEATURES: List[str] = []
 DEMOGRAPHICS: Optional[pd.DataFrame] = None
 METRICS: Optional[Dict[str, Any]] = None
+MODEL_VERSION: Optional[str] = SETTINGS.model_version
 
 # Type alias for clarity: acceptable containers for feature name lists
 FeatureNames = Sequence[str]
 
 # Input policy for handling extra fields on full-schema requests: allow|ignore|forbid
-INPUT_EXTRA_POLICY = os.getenv("INPUT_EXTRA_POLICY", "allow").lower()
+INPUT_EXTRA_POLICY = SETTINGS.input_extra_policy
 if INPUT_EXTRA_POLICY not in {"allow", "ignore", "forbid"}:
 	INPUT_EXTRA_POLICY = "allow"
 
@@ -132,12 +157,14 @@ def load_artifacts(model_dir: Path, data_dir: Path) -> Tuple[Any, List[str], pd.
 @app.on_event("startup")
 def startup_event() -> None:
 	"""Load heavy artifacts once at process start to minimize per-request latency."""
-	global MODEL, MODEL_FEATURES, DEMOGRAPHICS, METRICS
+	global MODEL, MODEL_FEATURES, DEMOGRAPHICS, METRICS, MODEL_VERSION
 	MODEL, MODEL_FEATURES, DEMOGRAPHICS = load_artifacts(MODEL_DIR, DATA_DIR)
 	metrics_path = MODEL_DIR / "metrics.json"
 	if metrics_path.exists():
 		try:
 			METRICS = json.load(open(metrics_path))
+			if MODEL_VERSION is None:
+				MODEL_VERSION = (METRICS or {}).get("model_version")
 		except Exception:
 			METRICS = None
 
@@ -149,6 +176,7 @@ def healthz() -> Dict[str, Any]:
 		"status": "ok",
 		"num_features": len(MODEL_FEATURES) if MODEL_FEATURES else 0,
 		"algorithm": (METRICS or {}).get("algorithm"),
+		"model_version": MODEL_VERSION,
 	}
 
 
@@ -169,6 +197,7 @@ def metrics() -> Dict[str, Any]:
 		"metrics": METRICS or {},
 		"feature_count": len(MODEL_FEATURES) if MODEL_FEATURES else 0,
 		"algorithm": (METRICS or {}).get("algorithm"),
+		"model_version": MODEL_VERSION,
 	}
 
 
@@ -226,8 +255,48 @@ def _predict_dataframe(df: pd.DataFrame) -> List[float]:
 	return [float(x) for x in preds]
 
 
+# --- Auth and simple rate limiting (optional; enabled by env) ---
+
+def require_api_key(x_api_key: Optional[str] = Header(None)) -> None:
+	if not SETTINGS.api_keys:
+		return
+	if x_api_key is None or x_api_key not in SETTINGS.api_keys:
+		raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+class _SimpleRateLimiter:
+	def __init__(self, per_minute: int) -> None:
+		self.per_minute = max(0, per_minute)
+		self._counts: Dict[str, Tuple[float, int]] = {}
+		self._lock = threading.Lock()
+
+	def allow(self, key: str) -> bool:
+		if self.per_minute <= 0:
+			return True
+		now = time.monotonic()
+		window_start = int(now // 60)
+		with self._lock:
+			prev = self._counts.get(key)
+			if prev is None or prev[0] != window_start:
+				self._counts[key] = (window_start, 1)
+				return True
+			if prev[1] >= self.per_minute:
+				return False
+			self._counts[key] = (window_start, prev[1] + 1)
+			return True
+
+
+_RATE_LIMITER = _SimpleRateLimiter(SETTINGS.rate_limit_per_minute)
+
+
+def rate_limit_dependency(request: Request, x_api_key: Optional[str] = Header(None)) -> None:
+	identity = x_api_key or (request.client.host if request.client else "unknown")
+	if not _RATE_LIMITER.allow(identity):
+		raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+
 @app.post("/predict", response_model=BatchPredictResponse)
-async def predict(payload: Union[SaleFull, List[SaleFull]]) -> BatchPredictResponse:
+async def predict(payload: Union[SaleFull, List[SaleFull]], _: None = Depends(require_api_key), __: None = Depends(rate_limit_dependency)) -> BatchPredictResponse:
 	"""Predict from full-schema payload(s)."""
 	records: List[Dict[str, Any]] = (
 		[p.model_dump() for p in payload] if isinstance(payload, list) else [payload.model_dump()]
@@ -244,7 +313,7 @@ async def predict(payload: Union[SaleFull, List[SaleFull]]) -> BatchPredictRespo
 
 
 @app.post("/predict_minimal", response_model=BatchPredictResponse)
-async def predict_minimal(payload: Union[SaleMinimal, List[SaleMinimal]]) -> BatchPredictResponse:
+async def predict_minimal(payload: Union[SaleMinimal, List[SaleMinimal]], _: None = Depends(require_api_key), __: None = Depends(rate_limit_dependency)) -> BatchPredictResponse:
 	"""Predict from a minimal set of sales fields; server fills demographics."""
 	records: List[Dict[str, Any]] = (
 		[p.model_dump() for p in payload] if isinstance(payload, list) else [payload.model_dump()]

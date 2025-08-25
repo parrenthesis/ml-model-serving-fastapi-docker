@@ -26,10 +26,12 @@ COPY data ./data
 COPY model ./model
 
 ENV MODEL_DIR=/app/model \
-	DATA_DIR=/app/data
+	DATA_DIR=/app/data \
+	WEB_CONCURRENCY=2 \
+	RATE_LIMIT_PER_MINUTE=0
 
 EXPOSE 8000
 # For demos only: to train inside the container, you could replace CMD with
-# `python create_model.py && uvicorn app.main:app --host 0.0.0.0 --port 8000`
+# `python create_model.py && gunicorn -k uvicorn.workers.UvicornWorker -w $WEB_CONCURRENCY -b 0.0.0.0:8000 app.main:app`
 # but best practice is to train before build and keep images immutable.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "${WEB_CONCURRENCY}", "-b", "0.0.0.0:8000", "app.main:app"]

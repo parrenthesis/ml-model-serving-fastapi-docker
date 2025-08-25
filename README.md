@@ -24,7 +24,8 @@ docker compose down
 ```bash
 poetry install --no-root
 poetry run python create_model.py      # train (KNN)
-poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000
+# run with gunicorn/uvicorn worker (production-like)
+gunicorn -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} -b 0.0.0.0:8000 app.main:app
 ```
 Smoke test:
 ```bash
@@ -45,6 +46,7 @@ Minimal example:
 ```bash
 curl -s -X POST http://localhost:8000/predict_minimal \
   -H 'Content-Type: application/json' \
+  -H 'X-API-Key: <your-key>' \
   -d '{
     "bedrooms": 3, "bathrooms": 2.0, "sqft_living": 2000,
     "sqft_lot": 5000, "floors": 1.0, "sqft_above": 1500,
@@ -69,13 +71,23 @@ curl -s -X POST http://localhost:8000/predict_minimal \
 - `INPUT_EXTRA_POLICY` – how `/predict` handles unknown fields
   - `allow` (default), `ignore`, or `forbid`
   - Set in compose (default: allow) or as an env var locally
+- `API_KEYS` – optional comma-separated list. If set, `X-API-Key` is required on predict endpoints.
+- `RATE_LIMIT_PER_MINUTE` – optional integer per-identity limit; 0 disables.
+- `MODEL_VERSION` – optional override; also inferred from `metrics.json` if present.
+- `WEB_CONCURRENCY` – gunicorn worker count (default 2).
 - Zipcode validated as 5 digits (regex)
+
+Notes
+- If `API_KEYS` is set, include `-H 'X-API-Key: <your-key>'` on requests.
+- `model_version` appears in `/healthz` and `/metrics` for visibility.
 
 ## Dev commands (Makefile)
 ```bash
 make train        # train KNN
 make train-xgb    # train XGBoost
-make api          # run FastAPI locally
+make train-knn-tuned    # train KNN with CV tuning
+make train-xgb-tuned    # train XGB with CV tuning
+make api          # run FastAPI locally (gunicorn)
 make test-api     # post sample rows to /predict
 make docker-build # build image
 make up           # compose up (builds and starts)

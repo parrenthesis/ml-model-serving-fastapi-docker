@@ -5,3 +5,5 @@ scikit-learn==1.3.1
 numpy>=1.26,<3
 python-dotenv>=1.0.1
 xgboost>=2.0,<3
+gunicorn>=21,<22
+orjson>=3.9,<4
