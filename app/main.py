@@ -163,8 +163,10 @@ def startup_event() -> None:
 	if metrics_path.exists():
 		try:
 			METRICS = json.load(open(metrics_path))
-			if MODEL_VERSION is None:
-				MODEL_VERSION = (METRICS or {}).get("model_version")
+			# Prefer metrics.json version over default env "dev" (but keep explicit overrides)
+			metrics_version = (METRICS or {}).get("model_version")
+			if metrics_version and (MODEL_VERSION in (None, "", "dev")):
+				MODEL_VERSION = metrics_version
 		except Exception:
 			METRICS = None
 

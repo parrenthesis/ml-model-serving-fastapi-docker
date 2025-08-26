@@ -20,8 +20,11 @@ api: ## Run FastAPI locally with gunicorn/uvicorn worker
 test-api: ## Post samples from future_unseen_examples.csv to /predict
 	$(PY) python tests/test_api.py
 
+VERSION?=$(shell jq -r '.model_version // "dev"' model/metrics.json 2>/dev/null || echo dev)
+
 docker-build: ## Build Docker image locally
-	docker build -t housing-api:latest .
+	docker build --build-arg MODEL_VERSION=$(VERSION) -t housing-api:$(VERSION) -t housing-api:latest .
+	@echo Built tags: housing-api:$(VERSION) and housing-api:latest
 
 up: ## Compose up (build and start container)
 	docker compose up --build -d
