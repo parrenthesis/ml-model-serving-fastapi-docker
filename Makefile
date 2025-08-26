@@ -15,7 +15,8 @@ train-xgb-tuned: ## Train XGBoost with CV tuning and write artifacts
 	$(PY) python create_model.py --algo xgboost --tune xgb --cv-folds 5 --n-iter 30
 
 api: ## Run FastAPI locally with gunicorn/uvicorn worker
-	gunicorn -k uvicorn.workers.UvicornWorker -w $${WEB_CONCURRENCY:-2} -b 0.0.0.0:8000 app.main:app
+	$(PY) gunicorn -k uvicorn.workers.UvicornWorker -w $${WEB_CONCURRENCY:-2} -b 0.0.0.0:8000 app.main:app || \
+		$(PY) uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 test-api: ## Post samples from future_unseen_examples.csv to /predict
 	$(PY) python tests/test_api.py

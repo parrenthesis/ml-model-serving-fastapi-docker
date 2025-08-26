@@ -14,6 +14,8 @@ fastapi = ">=0.112,<1"
 uvicorn = { version = ">=0.29,<1", extras = ["standard"] }
 python-dotenv = ">=1.0.1"
 xgboost = ">=2.0,<3"
+gunicorn = ">=21,<22"
+orjson = ">=3.9,<4"
 
 [tool.poetry.group.dev.dependencies]
 requests = "^2.32.3"
