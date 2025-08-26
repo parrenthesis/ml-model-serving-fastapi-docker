@@ -37,6 +37,7 @@ health: ## Check healthz and readyz endpoints
 	curl -sf http://localhost:8000/healthz && echo && curl -sf http://localhost:8000/readyz
 
 ci-smoke: docker-build ## Build, run, health check, and stop
+	-@docker rm -f api >/dev/null 2>&1 || true
 	docker run -d -p 8000:8000 --name api housing-api:latest
 	sleep 3 && curl -sf http://localhost:8000/healthz && curl -sf http://localhost:8000/readyz
 	docker rm -f api || true
