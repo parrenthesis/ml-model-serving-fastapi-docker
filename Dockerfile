@@ -25,6 +25,11 @@ COPY data ./data
 # artifacts are provided at runtime (e.g., mounted volume or remote fetch).
 COPY model ./model
 
+ARG MODEL_VERSION=dev
+ENV MODEL_VERSION=${MODEL_VERSION}
+LABEL org.opencontainers.image.title="housing-api" \
+      org.opencontainers.image.version="${MODEL_VERSION}"
+
 ENV MODEL_DIR=/app/model \
 	DATA_DIR=/app/data \
 	WEB_CONCURRENCY=2 \

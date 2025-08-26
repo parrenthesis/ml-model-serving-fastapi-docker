@@ -25,7 +25,14 @@ jobs:
 
       - name: Build Docker image
         working-directory: ${{ env.APP_DIR }}
-        run: docker build -t housing-api:ci .
+        run: |
+          VERSION=$(jq -r '.model_version // .algorithm' model/metrics.json || echo "dev")
+          docker build \
+            --build-arg MODEL_VERSION="$VERSION" \
+            -t housing-api:"$VERSION" \
+            -t housing-api:ci \
+            -t housing-api:latest \
+            .
 
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@0.20.0

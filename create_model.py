@@ -6,6 +6,8 @@ import pathlib
 import pickle
 import os
 import argparse
+from datetime import datetime
+import subprocess
 from typing import List
 from typing import Tuple
 
@@ -244,8 +246,17 @@ def main():
 			  open(output_dir / "model_features.json", 'w'))
 
 	# Save simple metrics for reference
+	def _git_sha_short() -> str:
+		try:
+			return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+		except Exception:
+			return "nogit"
+
+	model_version = os.getenv("MODEL_VERSION") or f"{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{_git_sha_short()}"
+
 	json.dump(
 		{
+			"model_version": model_version,
 			"algorithm": used_algorithm,
 			"best_params": best_params,
 			"cv_score_neg_rmse": cv_score,
