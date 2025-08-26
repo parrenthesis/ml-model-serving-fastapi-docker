@@ -36,9 +36,8 @@ ENV MODEL_DIR=/app/model \
 	RATE_LIMIT_PER_MINUTE=0
 
 EXPOSE 8000
-# For demos only: to train inside the container, you could replace CMD with
+# For demos only: to train inside the container, replace CMD with
 # `python create_model.py && gunicorn -k uvicorn.workers.UvicornWorker -w $WEB_CONCURRENCY -b 0.0.0.0:8000 app.main:app`
-# but best practice is to train before build and keep images immutable.
 # Use shell form so env vars (WEB_CONCURRENCY) expand with defaults.
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
