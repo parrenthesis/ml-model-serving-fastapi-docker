@@ -35,4 +35,6 @@ EXPOSE 8000
 # `python create_model.py && gunicorn -k uvicorn.workers.UvicornWorker -w $WEB_CONCURRENCY -b 0.0.0.0:8000 app.main:app`
 # but best practice is to train before build and keep images immutable.
 # Use shell form so env vars (WEB_CONCURRENCY) expand with defaults.
-CMD sh -c "gunicorn -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} -b 0.0.0.0:8000 app.main:app"
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+CMD ["/usr/local/bin/docker-entrypoint.sh"]
