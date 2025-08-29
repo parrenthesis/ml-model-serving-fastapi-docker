@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM python:3.11-slim
+FROM python:3.11-slim as builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
 	PYTHONUNBUFFERED=1 \
@@ -12,17 +12,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	build-essential \
 	&& rm -rf /var/lib/apt/lists/*
 
-# Copy only requirement first for caching
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+FROM python:3.11-slim as runtime
+ENV PYTHONDONTWRITEBYTECODE=1 \
+	PYTHONUNBUFFERED=1 \
+	PIP_NO_CACHE_DIR=1
+WORKDIR /app
+
+# System deps (runtime only)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	&& rm -rf /var/lib/apt/lists/*
+
+# Copy installed site-packages from builder
+COPY --from=builder /install /usr/local
 
 # Copy application code and data
 COPY app ./app
 COPY data ./data
-
-# Copy pre-generated model artifacts (train before building the image)
-# If model/ is absent, build will still succeed but API will fail readiness until
-# artifacts are provided at runtime (e.g., mounted volume or remote fetch).
+# Pre-generated model artifacts (optional at build)
 COPY model ./model
 
 ARG MODEL_VERSION=dev

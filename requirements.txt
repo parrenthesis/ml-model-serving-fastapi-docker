@@ -7,3 +7,6 @@ python-dotenv>=1.0.1
 xgboost>=2.0,<3
 gunicorn>=21,<22
 orjson>=3.9,<4
+prometheus-client>=0.19,<1
+python-json-logger>=2.0,<3
+requests>=2.31,<3

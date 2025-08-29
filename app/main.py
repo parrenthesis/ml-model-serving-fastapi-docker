@@ -8,13 +8,15 @@ import json
 import os
 import time
 import threading
+import hashlib
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from typing import Sequence
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request, Depends, Header
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 try:
 	import orjson
 	from fastapi.responses import ORJSONResponse  # type: ignore
@@ -23,6 +25,19 @@ except Exception:
 	DefaultResponseClass = JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 import pickle
+import logging
+
+try:
+	from prometheus_client import Counter, Histogram, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST  # type: ignore
+except Exception:
+	Counter = Histogram = CollectorRegistry = None  # type: ignore
+	generate_latest = None  # type: ignore
+	CONTENT_TYPE_LATEST = "text/plain"  # type: ignore
+
+try:
+	import requests  # type: ignore
+except Exception:
+	requests = None  # type: ignore
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
@@ -35,6 +50,21 @@ class Settings(BaseModel):
 	api_keys: List[str] = [k.strip() for k in os.getenv("API_KEYS", "").split(",") if k.strip()]
 	rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "0"))
 	model_version: Optional[str] = os.getenv("MODEL_VERSION")
+	# Observability / logging
+	prometheus_enabled: bool = os.getenv("PROMETHEUS_ENABLED", "false").lower() in {"1", "true", "yes"}
+	log_json: bool = os.getenv("LOG_JSON", "false").lower() in {"1", "true", "yes"}
+	request_id_header: str = os.getenv("REQUEST_ID_HEADER", "X-Request-ID")
+	# Batch limits
+	max_batch: int = int(os.getenv("MAX_BATCH", "512"))
+	# Demographics cache
+	cache_size: int = int(os.getenv("CACHE_SIZE", "1024"))
+	cache_ttl_seconds: int = int(os.getenv("CACHE_TTL", "600"))
+	redis_url: Optional[str] = os.getenv("REDIS_URL") or None
+	# Hybrid artifact source
+	model_source: str = os.getenv("MODEL_SOURCE", "local").lower()
+	model_url: Optional[str] = os.getenv("MODEL_URL") or None
+	model_s3_uri: Optional[str] = os.getenv("MODEL_S3_URI") or None
+	model_sha256: Optional[str] = os.getenv("MODEL_SHA256") or None
 
 
 SETTINGS = Settings()
@@ -53,8 +83,53 @@ DEMOGRAPHICS: Optional[pd.DataFrame] = None
 METRICS: Optional[Dict[str, Any]] = None
 MODEL_VERSION: Optional[str] = SETTINGS.model_version
 
+# Logger setup (structured JSON optional)
+LOGGER = logging.getLogger("housing_api")
+if SETTINGS.log_json:
+	try:
+		from pythonjsonlogger import jsonlogger  # type: ignore
+		_handler = logging.StreamHandler()
+		fmt = jsonlogger.JsonFormatter("%(asctime)s %(levelname)s %(message)s")
+		_handler.setFormatter(fmt)
+		LOGGER.handlers = [_handler]
+		LOGGER.setLevel(logging.INFO)
+	except Exception:
+		LOGGER.setLevel(logging.INFO)
+else:
+	LOGGER.setLevel(logging.INFO)
+
 # Type alias for clarity: acceptable containers for feature name lists
 FeatureNames = Sequence[str]
+
+
+@app.middleware("http")
+async def _obs_middleware(request: Request, call_next):
+	start = time.perf_counter()
+	req_id = request.headers.get(SETTINGS.request_id_header) or str(uuid.uuid4())
+	request.state.request_id = req_id
+	try:
+		response = await call_next(request)
+	except Exception:
+		response = JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+		raise
+	finally:
+		elapsed = max(0.0, time.perf_counter() - start)
+		status = str(getattr(locals().get("response", None), "status_code", 500))
+		path = request.url.path
+		if SETTINGS.log_json:
+			LOGGER.info("request_complete", extra={
+				"request_id": req_id,
+				"path": path,
+				"method": request.method,
+				"status": int(status),
+				"latency_seconds": round(elapsed, 6),
+				"model_version": MODEL_VERSION,
+			})
+		if SETTINGS.prometheus_enabled and hasattr(app.state, "prom_requests"):
+			labels = {"path": path, "method": request.method, "status": status, "model_version": MODEL_VERSION or "unknown"}
+			app.state.prom_requests.labels(**labels).inc()
+			app.state.prom_latency.labels(**labels).observe(elapsed)
+	return response
 
 # Input policy for handling extra fields on full-schema requests: allow|ignore|forbid
 INPUT_EXTRA_POLICY = SETTINGS.input_extra_policy
@@ -135,15 +210,76 @@ def _load_pickle(path: Path):
 		return pickle.load(f)
 
 
+def _sha256_file(path: Path) -> str:
+	h = hashlib.sha256()
+	with open(path, "rb") as f:
+		for chunk in iter(lambda: f.read(8192), b""):
+			h.update(chunk)
+	return h.hexdigest()
+
+
+def _maybe_fetch_remote_artifacts(local_model_dir: Path) -> Path:
+	"""Hybrid artifact fetch; returns directory to load artifacts from or local fallback."""
+	if SETTINGS.model_source == "local":
+		return local_model_dir
+	cache_root = ROOT_DIR / "model_cache"
+	cache_root.mkdir(exist_ok=True)
+	version = SETTINGS.model_version or "unknown"
+	cache_dir = cache_root / version
+	try:
+		if SETTINGS.model_source == "http":
+			if requests is None:
+				raise ImportError("requests is required for MODEL_SOURCE=http")
+			base = (SETTINGS.model_url or "").rstrip("/")
+			if not base:
+				raise ValueError("MODEL_URL must be set for MODEL_SOURCE=http")
+			cache_dir.mkdir(exist_ok=True)
+			for name in ("model.pkl", "model_features.json", "metrics.json"):
+				r = requests.get(f"{base}/{name}", timeout=15)
+				r.raise_for_status()
+				(cache_dir / name).write_bytes(r.content)
+			if SETTINGS.model_sha256:
+				sha = _sha256_file(cache_dir / "model.pkl")
+				if sha.lower() != SETTINGS.model_sha256.lower():
+					raise ValueError("MODEL_SHA256 verification failed for model.pkl")
+			return cache_dir
+		elif SETTINGS.model_source == "s3":
+			try:
+				import boto3  # type: ignore
+			except Exception as e:
+				raise ImportError("boto3 is required for MODEL_SOURCE=s3") from e
+			uri = (SETTINGS.model_s3_uri or "").rstrip("/")
+			if not uri.startswith("s3://"):
+				raise ValueError("MODEL_S3_URI must start with s3://")
+			_, _, rest = uri.partition("s3://")
+			bucket, _, prefix = rest.partition("/")
+			cache_dir.mkdir(exist_ok=True)
+			s3 = boto3.client("s3")
+			for name in ("model.pkl", "model_features.json", "metrics.json"):
+				key = f"{prefix}/{name}" if prefix else name
+				s3.download_file(bucket, key, str(cache_dir / name))
+			if SETTINGS.model_sha256:
+				sha = _sha256_file(cache_dir / "model.pkl")
+				if sha.lower() != SETTINGS.model_sha256.lower():
+					raise ValueError("MODEL_SHA256 verification failed for model.pkl")
+			return cache_dir
+		else:
+			return local_model_dir
+	except Exception as e:
+		LOGGER.warning("hybrid_fetch_failed", extra={"error": str(e)})
+		return local_model_dir
+
+
 def load_artifacts(model_dir: Path, data_dir: Path) -> Tuple[Any, List[str], pd.DataFrame]:
-	"""Load model, feature list, and demographics table from disk."""
-	model_path = model_dir / "model.pkl"
-	features_path = model_dir / "model_features.json"
+	"""Load model, feature list, and demographics table from disk or remote (hybrid)."""
+	chosen_dir = _maybe_fetch_remote_artifacts(model_dir)
+	model_path = chosen_dir / "model.pkl"
+	features_path = chosen_dir / "model_features.json"
 	demographics_path = data_dir / "zipcode_demographics.csv"
 
 	if not model_path.exists() or not features_path.exists():
 		raise FileNotFoundError(
-			f"Model artifacts not found in {model_dir}. Run 'python create_model.py' first.")
+			f"Model artifacts not found in {chosen_dir}. Run 'python create_model.py' first.")
 
 	model = _load_pickle(model_path)
 	model_features: List[str] = json.load(open(features_path))
@@ -169,6 +305,17 @@ def startup_event() -> None:
 				MODEL_VERSION = metrics_version
 		except Exception:
 			METRICS = None
+
+	# Setup Prometheus registry if enabled
+	if SETTINGS.prometheus_enabled and Counter is not None and Histogram is not None:
+		_registry = CollectorRegistry()
+		app.state.prom_requests = Counter(
+			"api_requests_total", "Count of API requests", ["path", "method", "status", "model_version"], registry=_registry
+		)
+		app.state.prom_latency = Histogram(
+			"api_request_duration_seconds", "Latency of API requests", ["path", "method", "status", "model_version"], registry=_registry
+		)
+		app.state.prom_registry = _registry
 
 
 @app.get("/healthz")
@@ -201,6 +348,15 @@ def metrics() -> Dict[str, Any]:
 		"algorithm": (METRICS or {}).get("algorithm"),
 		"model_version": MODEL_VERSION,
 	}
+
+
+@app.get("/metrics_prom")
+def metrics_prometheus():
+	"""Prometheus exposition format when enabled."""
+	if not SETTINGS.prometheus_enabled or generate_latest is None or not hasattr(app.state, "prom_registry"):
+		raise HTTPException(status_code=404, detail="Prometheus disabled")
+	data = generate_latest(app.state.prom_registry)
+	return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 
 
 def _ensure_required_fields(df: pd.DataFrame, required: FeatureNames) -> None:
@@ -300,6 +456,9 @@ def rate_limit_dependency(request: Request, x_api_key: Optional[str] = Header(No
 @app.post("/predict", response_model=BatchPredictResponse)
 async def predict(payload: Union[SaleFull, List[SaleFull]], _: None = Depends(require_api_key), __: None = Depends(rate_limit_dependency)) -> BatchPredictResponse:
 	"""Predict from full-schema payload(s)."""
+	# Enforce batch cap if a list is provided
+	if isinstance(payload, list) and len(payload) > max(1, SETTINGS.max_batch):
+		raise HTTPException(status_code=422, detail=f"Batch too large; max is {SETTINGS.max_batch}")
 	records: List[Dict[str, Any]] = (
 		[p.model_dump() for p in payload] if isinstance(payload, list) else [payload.model_dump()]
 	)
@@ -317,6 +476,9 @@ async def predict(payload: Union[SaleFull, List[SaleFull]], _: None = Depends(re
 @app.post("/predict_minimal", response_model=BatchPredictResponse)
 async def predict_minimal(payload: Union[SaleMinimal, List[SaleMinimal]], _: None = Depends(require_api_key), __: None = Depends(rate_limit_dependency)) -> BatchPredictResponse:
 	"""Predict from a minimal set of sales fields; server fills demographics."""
+	# Enforce batch cap if a list is provided
+	if isinstance(payload, list) and len(payload) > max(1, SETTINGS.max_batch):
+		raise HTTPException(status_code=422, detail=f"Batch too large; max is {SETTINGS.max_batch}")
 	records: List[Dict[str, Any]] = (
 		[p.model_dump() for p in payload] if isinstance(payload, list) else [payload.model_dump()]
 	)
