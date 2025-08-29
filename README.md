@@ -35,12 +35,15 @@ poetry run python tests/test_api.py
 ## Endpoints
 - POST `/predict` (full schema)
   - JSON matches `data/future_unseen_examples.csv` (no price/date/id). Server joins demographics by `zipcode` and aligns to training features.
+  - Accepts a single object or a list (batch). When a list is provided, `MAX_BATCH` is enforced (422 if exceeded).
 - POST `/predict_minimal` (minimal schema)
   - Only the following fields are required; the server fills demographics:
     - `bedrooms,bathrooms,sqft_living,sqft_lot,floors,sqft_above,sqft_basement,zipcode`
+  - Accepts a single object or a list (batch). `MAX_BATCH` enforced for lists.
 - GET `/healthz` – liveness
 - GET `/readyz` – readiness (artifacts loaded)
 - GET `/metrics` – model/service metrics and metadata (no inference)
+- GET `/metrics_prom` – Prometheus exposition (enabled via env)
 
 Minimal example:
 ```bash
@@ -76,6 +79,14 @@ curl -s -X POST http://localhost:8000/predict_minimal \
 - `MODEL_VERSION` – optional override; also inferred from `metrics.json` if present.
 - `WEB_CONCURRENCY` – gunicorn worker count (default 2).
 - Zipcode validated as 5 digits (regex)
+- `MAX_BATCH` – maximum list size for batch requests (default 512).
+- `PROMETHEUS_ENABLED` – enable `/metrics_prom` exposition (default false).
+- `LOG_JSON` – enable structured JSON logs; `REQUEST_ID_HEADER` can supply or propagate request id.
+- Hybrid artifacts (optional; falls back to local on failure):
+  - `MODEL_SOURCE` – `local|http|s3` (default `local`).
+  - `MODEL_URL` – base URL for HTTP when `MODEL_SOURCE=http`.
+  - `MODEL_S3_URI` – `s3://bucket/prefix` when `MODEL_SOURCE=s3`.
+  - `MODEL_SHA256` – optional checksum for `model.pkl`; verify when provided.
 
 Notes
 - If `API_KEYS` is set, include `-H 'X-API-Key: <your-key>'` on requests.
@@ -105,6 +116,7 @@ make ci-smoke     # build, run, health checks, stop
 - Server-side enrichment for consistency and governance
 - Docker for reproducible deploys; compose for local/PoC runs
 - Separate training from build (immutable images; faster CI)
+- Optional Prometheus metrics and structured logs for observability; batch support for throughput
 
 ## License
 MIT (code). Respect any data source restrictions.
