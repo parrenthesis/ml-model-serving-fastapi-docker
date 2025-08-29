@@ -387,6 +387,23 @@ def _enrich_with_demographics(df: pd.DataFrame, demographics: pd.DataFrame) -> p
 			"error": "Unknown zipcode(s) for demographics enrichment",
 			"zipcodes": unknown
 		})
+	# Populate a simple in-process LRU cache for future lookups (optional)
+	if not hasattr(app.state, "dem_cache"):
+		app.state.dem_cache = {}
+		app.state.dem_cache_order = []
+		app.state.dem_cache_expiry = {}
+	for _, r in merged[["zipcode"] + dem_cols].drop_duplicates("zipcode").iterrows():
+		z = str(r["zipcode"])  # type: ignore[index]
+		row_dict = {col: r[col] for col in dem_cols}
+		app.state.dem_cache[z] = row_dict
+		app.state.dem_cache_expiry[z] = time.time() + max(1, SETTINGS.cache_ttl_seconds)
+		if z in app.state.dem_cache_order:
+			app.state.dem_cache_order.remove(z)
+		app.state.dem_cache_order.append(z)
+		while len(app.state.dem_cache_order) > max(1, SETTINGS.cache_size):
+			old = app.state.dem_cache_order.pop(0)
+			app.state.dem_cache.pop(old, None)
+			app.state.dem_cache_expiry.pop(old, None)
 	merged = merged.drop(columns=["zipcode"])  # zipcode not used by model after join
 	return merged
 
