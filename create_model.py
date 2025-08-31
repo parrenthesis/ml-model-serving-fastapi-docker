@@ -107,6 +107,42 @@ def build_model(algorithm: str, max_workers: int):
 		raise ValueError(f"Unsupported algorithm: {algorithm}")
 
 
+def build_quantile_model(quantile: float, max_workers: int):
+	"""Build XGBoost quantile regression model for confidence intervals."""
+	try:
+		from xgboost import XGBRegressor  # type: ignore
+	except Exception as e:
+		raise ImportError(
+			"xgboost is not installed. Install with 'pip install xgboost' or use requirements-xgb.txt"
+		) from e
+	
+	return XGBRegressor(
+		objective='reg:quantileerror',
+		quantile_alpha=quantile,
+		n_estimators=500,
+		max_depth=8,
+		learning_rate=0.05,
+		subsample=0.9,
+		colsample_bytree=0.9,
+		early_stopping_rounds=50,
+		random_state=42,
+		n_jobs=max_workers
+	)
+
+
+def train_confidence_models(x_train, y_train, x_test, y_test, max_workers: int):
+	"""Train median, lower, and upper quantile models for confidence intervals."""
+	models = {}
+	quantiles = [0.05, 0.5, 0.95]  # 90% prediction interval
+	
+	for q in quantiles:
+		model = build_quantile_model(q, max_workers)
+		model.fit(x_train, y_train, eval_set=[(x_test, y_test)], verbose=False)
+		models[f"quantile_{q}"] = model
+	
+	return models
+
+
 def tune_knn(x, y, cv_folds: int, max_workers: int):
 	"""Grid-search KNN hyperparameters with CV; returns best estimator and info."""
 	scoring = "neg_root_mean_squared_error"
@@ -189,6 +225,8 @@ def main():
 				help="Randomized search iterations for xgb (default 30)")
 	parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS,
 				help="Max parallel workers (threads/processes). Default from MAX_WORKERS env or 2.")
+	parser.add_argument("--confidence", action="store_true", default=True,
+				help="Train confidence interval models (default: True)")
 	args = parser.parse_args()
 	algorithm = args.algo
 	max_workers = max(1, int(args.max_workers))
@@ -240,10 +278,48 @@ def main():
 	output_dir = pathlib.Path(OUTPUT_DIR)
 	output_dir.mkdir(exist_ok=True)
 
+	# Clean previous artifacts to avoid pollution
+	print("Cleaning previous model artifacts...")
+	for artifact in output_dir.glob("*"):
+		if artifact.is_file():
+			artifact.unlink()
+			print(f"Removed: {artifact.name}")
+
 	# Output model artifacts: pickled model and JSON list of features
 	pickle.dump(model, open(output_dir / "model.pkl", 'wb'))
 	json.dump(list(x_train.columns),
 			  open(output_dir / "model_features.json", 'w'))
+
+	# Train and save confidence models (quantile regression) if using XGBoost
+	if algorithm.lower() == "xgboost" and args.confidence:
+		try:
+			print("Training confidence interval models...")
+			confidence_models = train_confidence_models(x_train, y_train, x_test, y_test, max_workers)
+			
+			# Save quantile models
+			for name, model in confidence_models.items():
+				pickle.dump(model, open(output_dir / f"{name}.pkl", 'wb'))
+			
+			# Save training data for feature distance calculations
+			training_data_with_targets = x_train.copy()
+			training_data_with_targets['price'] = y_train
+			pickle.dump(training_data_with_targets, open(output_dir / "training_data.pkl", 'wb'))
+			
+			print("Confidence models saved successfully")
+		except Exception as e:
+			print(f"Warning: Failed to train confidence models: {e}")
+			print("Continuing without confidence intervals...")
+	elif algorithm.lower() == "knn" and args.confidence:
+		try:
+			print("Saving training data for KNN confidence intervals...")
+			# For KNN, we save both features and targets for variance calculations
+			training_data_with_targets = x_train.copy()
+			training_data_with_targets['price'] = y_train
+			pickle.dump(training_data_with_targets, open(output_dir / "training_data.pkl", 'wb'))
+			print("Training data saved for KNN confidence intervals")
+		except Exception as e:
+			print(f"Warning: Failed to save training data: {e}")
+			print("Continuing without confidence intervals...")
 
 	# Save simple metrics for reference
 	def _git_sha_short() -> str:

@@ -3,16 +3,16 @@
 PY=poetry run
 
 train: ## Train KNN model and write artifacts to model/
-	$(PY) python create_model.py
+	$(PY) python create_model.py --confidence
 
 train-knn-tuned: ## Train KNN with CV tuning and write artifacts
-	$(PY) python create_model.py --algo knn --tune knn --cv-folds 5
+	$(PY) python create_model.py --algo knn --tune knn --cv-folds 5 --confidence
 
 train-xgb: ## Train XGBoost model (requires xgboost) and write artifacts
-	$(PY) python create_model.py --algo xgboost
+	$(PY) python create_model.py --algo xgboost --confidence
 
 train-xgb-tuned: ## Train XGBoost with CV tuning and write artifacts
-	$(PY) python create_model.py --algo xgboost --tune xgb --cv-folds 5 --n-iter 30
+	$(PY) python create_model.py --algo xgboost --tune xgb --cv-folds 5 --n-iter 30 --confidence
 
 api: ## Run FastAPI locally with gunicorn/uvicorn worker
 	$(PY) gunicorn -k uvicorn.workers.UvicornWorker -w $${WEB_CONCURRENCY:-2} -b 0.0.0.0:8000 app.main:app || \
@@ -23,9 +23,10 @@ test-api: ## Post samples from future_unseen_examples.csv to /predict
 
 VERSION?=$(shell jq -r '.model_version // "dev"' model/metrics.json 2>/dev/null || echo dev)
 
-docker-build: ## Build Docker image locally
+docker-build: ## Build Docker image locally (includes confidence interval artifacts)
 	docker build --build-arg MODEL_VERSION=$(VERSION) -t housing-api:$(VERSION) -t housing-api:latest .
 	@echo Built tags: housing-api:$(VERSION) and housing-api:latest
+	@echo "Note: Image includes confidence interval artifacts (quantile_*.pkl, training_data.pkl)"
 
 up: ## Compose up (build and start container)
 	docker compose up --build -d
@@ -40,6 +41,8 @@ ci-smoke: docker-build ## Build, run, health check, and stop
 	-@docker rm -f api >/dev/null 2>&1 || true
 	docker run -d -p 8000:8000 --name api housing-api:latest
 	sleep 3 && curl -sf http://localhost:8000/healthz && curl -sf http://localhost:8000/readyz
+	@echo "✅ API health checks passed"
+	@echo "💡 API includes confidence intervals (CONFIDENCE_ENABLED=true)"
 	docker rm -f api || true
 
 help: ## Show make targets

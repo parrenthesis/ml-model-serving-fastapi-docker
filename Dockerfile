@@ -31,7 +31,7 @@ COPY --from=builder /install /usr/local
 # Copy application code and data
 COPY app ./app
 COPY data ./data
-# Pre-generated model artifacts (optional at build)
+# Copy all model artifacts including confidence models
 COPY model ./model
 
 ARG MODEL_VERSION=dev

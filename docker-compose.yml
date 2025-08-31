@@ -11,4 +11,6 @@ services:
       - INPUT_EXTRA_POLICY=allow
       - WEB_CONCURRENCY=2
       - RATE_LIMIT_PER_MINUTE=0
+      - CONFIDENCE_ENABLED=true
+      - CONFIDENCE_METHOD=hybrid
     restart: unless-stopped

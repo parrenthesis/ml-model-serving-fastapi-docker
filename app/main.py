@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from typing import Sequence
 
 import pandas as pd
+import numpy as np
 from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.responses import JSONResponse, Response
 try:
@@ -65,6 +66,11 @@ class Settings(BaseModel):
 	model_url: Optional[str] = os.getenv("MODEL_URL") or None
 	model_s3_uri: Optional[str] = os.getenv("MODEL_S3_URI") or None
 	model_sha256: Optional[str] = os.getenv("MODEL_SHA256") or None
+	# Confidence intervals
+	confidence_enabled: bool = os.getenv("CONFIDENCE_ENABLED", "true").lower() in {"1", "true", "yes"}
+	confidence_method: str = os.getenv("CONFIDENCE_METHOD", "hybrid")  # "quantile", "knn_variance", "feature_distance", "hybrid"
+	confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.3"))
+	feature_distance_threshold: float = float(os.getenv("FEATURE_DISTANCE_THRESHOLD", "2.0"))
 
 
 SETTINGS = Settings()
@@ -82,6 +88,11 @@ MODEL_FEATURES: List[str] = []
 DEMOGRAPHICS: Optional[pd.DataFrame] = None
 METRICS: Optional[Dict[str, Any]] = None
 MODEL_VERSION: Optional[str] = SETTINGS.model_version
+# Confidence interval models and data
+MODEL_MEDIAN: Any = None
+MODEL_LOWER: Any = None
+MODEL_UPPER: Any = None
+TRAINING_DATA: Optional[pd.DataFrame] = None
 
 # Logger setup (structured JSON optional)
 LOGGER = logging.getLogger("housing_api")
@@ -196,8 +207,12 @@ SaleFull = (
 
 
 class PredictResponse(BaseModel):
-	"""Lean prediction payload."""
+	"""Enhanced prediction payload with confidence intervals."""
 	prediction: float
+	confidence_interval: Optional[Dict[str, float]] = None  # {"lower": 450000, "upper": 550000}
+	confidence_score: Optional[float] = None  # 0.0-1.0 confidence in prediction
+	confidence_type: Optional[str] = None  # "quantile", "feature_distance", "hybrid"
+	feature_novelty: Optional[float] = None  # Distance to training data (0=very similar, 1=very novel)
 
 
 class BatchPredictResponse(BaseModel):
@@ -270,12 +285,18 @@ def _maybe_fetch_remote_artifacts(local_model_dir: Path) -> Path:
 		return local_model_dir
 
 
-def load_artifacts(model_dir: Path, data_dir: Path) -> Tuple[Any, List[str], pd.DataFrame]:
-	"""Load model, feature list, and demographics table from disk or remote (hybrid)."""
+def load_artifacts(model_dir: Path, data_dir: Path) -> Tuple[Any, List[str], pd.DataFrame, Any, Any, Any, Optional[pd.DataFrame]]:
+	"""Load model, feature list, demographics table, and confidence models from disk or remote (hybrid)."""
 	chosen_dir = _maybe_fetch_remote_artifacts(model_dir)
 	model_path = chosen_dir / "model.pkl"
 	features_path = chosen_dir / "model_features.json"
 	demographics_path = data_dir / "zipcode_demographics.csv"
+	
+	# Confidence model paths
+	model_median_path = chosen_dir / "quantile_0.5.pkl"
+	model_lower_path = chosen_dir / "quantile_0.05.pkl"
+	model_upper_path = chosen_dir / "quantile_0.95.pkl"
+	training_data_path = chosen_dir / "training_data.pkl"
 
 	if not model_path.exists() or not features_path.exists():
 		raise FileNotFoundError(
@@ -286,15 +307,35 @@ def load_artifacts(model_dir: Path, data_dir: Path) -> Tuple[Any, List[str], pd.
 
 	demographics = pd.read_csv(demographics_path, dtype={"zipcode": str})
 	demographics = demographics.set_index("zipcode", drop=True)
+	
+	# Load confidence models if they exist
+	model_median = None
+	model_lower = None
+	model_upper = None
+	training_data = None
+	
+	if model_median_path.exists() and model_lower_path.exists() and model_upper_path.exists():
+		try:
+			model_median = _load_pickle(model_median_path)
+			model_lower = _load_pickle(model_lower_path)
+			model_upper = _load_pickle(model_upper_path)
+		except Exception as e:
+			LOGGER.warning(f"Failed to load quantile models: {e}")
+	
+	if training_data_path.exists():
+		try:
+			training_data = _load_pickle(training_data_path)
+		except Exception as e:
+			LOGGER.warning(f"Failed to load training data: {e}")
 
-	return model, model_features, demographics
+	return model, model_features, demographics, model_median, model_lower, model_upper, training_data
 
 
 @app.on_event("startup")
 def startup_event() -> None:
 	"""Load heavy artifacts once at process start to minimize per-request latency."""
-	global MODEL, MODEL_FEATURES, DEMOGRAPHICS, METRICS, MODEL_VERSION
-	MODEL, MODEL_FEATURES, DEMOGRAPHICS = load_artifacts(MODEL_DIR, DATA_DIR)
+	global MODEL, MODEL_FEATURES, DEMOGRAPHICS, METRICS, MODEL_VERSION, MODEL_MEDIAN, MODEL_LOWER, MODEL_UPPER, TRAINING_DATA
+	MODEL, MODEL_FEATURES, DEMOGRAPHICS, MODEL_MEDIAN, MODEL_LOWER, MODEL_UPPER, TRAINING_DATA = load_artifacts(MODEL_DIR, DATA_DIR)
 	metrics_path = MODEL_DIR / "metrics.json"
 	if metrics_path.exists():
 		try:
@@ -430,6 +471,149 @@ def _predict_dataframe(df: pd.DataFrame) -> List[float]:
 	return [float(x) for x in preds]
 
 
+def _predict_with_confidence(df: pd.DataFrame) -> List[Dict[str, Any]]:
+	"""Enhanced prediction with confidence intervals."""
+	predictions = []
+	
+	for idx, row in df.iterrows():
+		# Base prediction
+		pred = MODEL.predict([row])[0]
+		
+		confidence_info = {}
+		
+		if SETTINGS.confidence_enabled:
+			if SETTINGS.confidence_method in ["quantile", "hybrid"] and MODEL_LOWER is not None and MODEL_UPPER is not None:
+				# Quantile regression confidence intervals
+				lower = MODEL_LOWER.predict([row])[0]
+				upper = MODEL_UPPER.predict([row])[0]
+				confidence_info["confidence_interval"] = {"lower": float(lower), "upper": float(upper)}
+				confidence_info["confidence_type"] = "quantile"
+				
+				# Calculate confidence score from interval width
+				interval_width = (upper - lower) / pred if pred > 0 else 0
+				confidence_info["confidence_score"] = max(0, 1 - interval_width / 1000000)  # Normalize by typical house price
+			
+			if SETTINGS.confidence_method in ["knn_variance", "hybrid"] and TRAINING_DATA is not None:
+				# KNN variance-based confidence (for KNN models)
+				if hasattr(MODEL, 'named_steps') and 'kneighborsregressor' in MODEL.named_steps:
+					# Get k-nearest neighbors and their predictions
+					knn_model = MODEL.named_steps['kneighborsregressor']
+					distances, indices = knn_model.kneighbors([row])
+					
+					# Get the actual target values for these neighbors
+					neighbor_values = TRAINING_DATA.iloc[indices[0]]['price'].values if 'price' in TRAINING_DATA.columns else None
+					
+					if neighbor_values is not None:
+						# Calculate variance of neighbor values
+						variance = np.var(neighbor_values)
+						mean_value = np.mean(neighbor_values)
+						
+						# Convert variance to confidence score (lower variance = higher confidence)
+						# Normalize by mean to get relative variance
+						relative_variance = variance / (mean_value ** 2) if mean_value > 0 else 1.0
+						knn_confidence = max(0, 1 - relative_variance)
+						
+						confidence_info["knn_variance"] = float(variance)
+						confidence_info["knn_confidence"] = float(knn_confidence)
+						
+						if SETTINGS.confidence_method == "knn_variance":
+							confidence_info["confidence_score"] = knn_confidence
+							confidence_info["confidence_type"] = "knn_variance"
+			
+			if SETTINGS.confidence_method in ["feature_distance", "hybrid"] and TRAINING_DATA is not None:
+				# Feature distance confidence
+				# Exclude target column for distance calculation
+				feature_columns = [col for col in TRAINING_DATA.columns if col != 'price']
+				feature_confidence, novelty = calculate_feature_distance(
+					row.values, TRAINING_DATA[feature_columns].values
+				)
+				confidence_info["feature_novelty"] = novelty
+				
+				if SETTINGS.confidence_method == "feature_distance":
+					confidence_info["confidence_score"] = feature_confidence
+					confidence_info["confidence_type"] = "feature_distance"
+				elif SETTINGS.confidence_method == "hybrid":
+					# Combine confidence measures
+					quantile_confidence = confidence_info.get("confidence_score", 0.5)
+					feature_confidence = confidence_info.get("confidence_score", feature_confidence)
+					knn_confidence = confidence_info.get("knn_confidence", 0.5)
+					
+					# Weight the different confidence measures
+					weights = []
+					confidences = []
+					
+					if "quantile" in confidence_info.get("confidence_type", ""):
+						weights.append(0.4)
+						confidences.append(quantile_confidence)
+					if "knn_variance" in confidence_info.get("confidence_type", ""):
+						weights.append(0.3)
+						confidences.append(knn_confidence)
+					if "feature_distance" in confidence_info.get("confidence_type", ""):
+						weights.append(0.3)
+						confidences.append(feature_confidence)
+					
+					if weights:
+						# Normalize weights
+						total_weight = sum(weights)
+						weights = [w / total_weight for w in weights]
+						confidence_info["confidence_score"] = sum(w * c for w, c in zip(weights, confidences))
+					else:
+						confidence_info["confidence_score"] = 0.5
+					
+					confidence_info["confidence_type"] = "hybrid"
+		
+		predictions.append({
+			"prediction": float(pred),
+			**confidence_info
+		})
+	
+	return predictions
+
+
+def calculate_feature_distance(input_features: np.ndarray, training_data: np.ndarray) -> Tuple[float, float]:
+	"""Calculate normalized distance to training data.
+	
+	Args:
+		input_features: Single row of features (1D array)
+		training_data: Training data matrix (2D array)
+		
+	Returns:
+		Tuple of (confidence_score, normalized_distance)
+		- confidence_score: 0.0-1.0 (1.0 = very similar to training data)
+		- normalized_distance: Raw distance metric (higher = more novel)
+	"""
+	try:
+		from scipy.spatial.distance import cdist
+	except ImportError:
+		# Fallback if scipy not available
+		return 0.5, 1.0
+	
+	# Ensure input_features is 2D for cdist
+	if input_features.ndim == 1:
+		input_features = input_features.reshape(1, -1)
+	
+	# Calculate distances to all training samples
+	distances = cdist(input_features, training_data, metric='euclidean')
+	
+	# Normalize by training data variance
+	training_std = np.std(training_data, axis=0)
+	# Avoid division by zero
+	training_std = np.where(training_std == 0, 1.0, training_std)
+	
+	# Ensure distances and training_std have compatible shapes
+	# distances[0] has shape (n_samples,) and training_std has shape (n_features,)
+	# We need to broadcast them properly
+	distances_flat = distances.flatten()
+	normalized_distance = np.mean(distances_flat / np.mean(training_std))
+	
+	# Convert to confidence score (0=very similar, 1=very novel)
+	# Use exponential decay: confidence = exp(-distance/scale_factor)
+	scale_factor = SETTINGS.feature_distance_threshold
+	confidence_score = np.exp(-normalized_distance / scale_factor)
+	
+	return float(confidence_score), float(normalized_distance)
+
+
 # --- Auth and simple rate limiting (optional; enabled by env) ---
 
 def require_api_key(x_api_key: Optional[str] = Header(None)) -> None:
@@ -485,8 +669,13 @@ async def predict(payload: Union[SaleFull, List[SaleFull]], _: None = Depends(re
 	enriched = _enrich_with_demographics(df, DEMOGRAPHICS)
 	aligned = _align_to_model_features(enriched, MODEL_FEATURES) # pre-existing model_features.json
 
-	preds = _predict_dataframe(aligned)
-	responses = [PredictResponse(prediction=p) for p in preds]
+	if SETTINGS.confidence_enabled:
+		pred_results = _predict_with_confidence(aligned)
+		responses = [PredictResponse(**pred) for pred in pred_results]
+	else:
+		preds = _predict_dataframe(aligned)
+		responses = [PredictResponse(prediction=p) for p in preds]
+	
 	return BatchPredictResponse(predictions=responses)
 
 
@@ -509,8 +698,13 @@ async def predict_minimal(payload: Union[SaleMinimal, List[SaleMinimal]], _: Non
 	enriched = _enrich_with_demographics(df_sale_only, DEMOGRAPHICS)
 	aligned = _align_to_model_features(enriched, MODEL_FEATURES) # pre-existing model_features.json
 
-	preds = _predict_dataframe(aligned) 
-	responses = [PredictResponse(prediction=p) for p in preds] 
+	if SETTINGS.confidence_enabled:
+		pred_results = _predict_with_confidence(aligned)
+		responses = [PredictResponse(**pred) for pred in pred_results]
+	else:
+		preds = _predict_dataframe(aligned) 
+		responses = [PredictResponse(prediction=p) for p in preds] 
+	
 	return BatchPredictResponse(predictions=responses) 
 
 
