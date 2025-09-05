@@ -13,4 +13,6 @@ services:
       - RATE_LIMIT_PER_MINUTE=0
       - CONFIDENCE_ENABLED=true
       - CONFIDENCE_METHOD=hybrid
+      - LOG_JSON=true
+      - PROMETHEUS_ENABLED=true
     restart: unless-stopped

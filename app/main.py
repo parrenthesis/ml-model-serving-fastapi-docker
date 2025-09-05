@@ -70,7 +70,9 @@ class Settings(BaseModel):
 	confidence_enabled: bool = os.getenv("CONFIDENCE_ENABLED", "true").lower() in {"1", "true", "yes"}
 	confidence_method: str = os.getenv("CONFIDENCE_METHOD", "hybrid")  # "quantile", "knn_variance", "feature_distance", "hybrid"
 	confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.3"))
-	feature_distance_threshold: float = float(os.getenv("FEATURE_DISTANCE_THRESHOLD", "2.0"))
+	# FIXED: Changed from 2.0 to 0.5 for more reasonable confidence scaling
+	# Lower values = higher confidence for similar houses, more realistic scores
+	feature_distance_threshold: float = float(os.getenv("FEATURE_DISTANCE_THRESHOLD", "0.5"))
 
 
 SETTINGS = Settings()
@@ -482,6 +484,11 @@ def _predict_with_confidence(df: pd.DataFrame) -> List[Dict[str, Any]]:
 		confidence_info = {}
 		
 		if SETTINGS.confidence_enabled:
+			# FIXED: Confidence calculations now properly capped and scaled
+			# - Quantile confidence: based on relative interval width, capped at 90%
+			# - KNN confidence: based on neighbor variance, capped at 90%
+			# - Feature distance: based on distance to training data, capped at 90%
+			# - Hybrid: weighted combination of all methods, capped at 90%
 			if SETTINGS.confidence_method in ["quantile", "hybrid"] and MODEL_LOWER is not None and MODEL_UPPER is not None:
 				# Quantile regression confidence intervals
 				lower = MODEL_LOWER.predict([row])[0]
@@ -489,9 +496,32 @@ def _predict_with_confidence(df: pd.DataFrame) -> List[Dict[str, Any]]:
 				confidence_info["confidence_interval"] = {"lower": float(lower), "upper": float(upper)}
 				confidence_info["confidence_type"] = "quantile"
 				
-				# Calculate confidence score from interval width
-				interval_width = (upper - lower) / pred if pred > 0 else 0
-				confidence_info["confidence_score"] = max(0, 1 - interval_width / 1000000)  # Normalize by typical house price
+				# Calculate confidence score from interval width - FIXED LOGIC
+				# Smaller interval = higher confidence, but cap at reasonable levels
+				if pred > 0:
+					# Calculate relative interval width (as percentage of prediction)
+					relative_interval = (upper - lower) / pred
+					# Convert to confidence: 0% interval = 100% confidence, 100% interval = 0% confidence
+					# FIXED: Cap confidence at 0.9 (90%) to avoid unrealistic scores like 0.999...
+					# This prevents the model from claiming near-perfect confidence
+					quantile_confidence = max(0.1, min(0.9, 1.0 - relative_interval))
+				else:
+					quantile_confidence = 0.5
+				
+				confidence_info["quantile_confidence"] = quantile_confidence
+				if SETTINGS.confidence_method == "quantile":
+					confidence_info["confidence_score"] = quantile_confidence
+				
+				# Add debugging info for quantile method
+				if SETTINGS.log_json:
+					confidence_info["debug"] = {
+						"lower": float(lower),
+						"upper": float(upper),
+						"prediction": float(pred),
+						"interval_width": float(upper - lower),
+						"relative_interval": float((upper - lower) / pred) if pred > 0 else 0,
+						"quantile_confidence": quantile_confidence
+					}
 			
 			if SETTINGS.confidence_method in ["knn_variance", "hybrid"] and TRAINING_DATA is not None:
 				# KNN variance-based confidence (for KNN models)
@@ -511,7 +541,9 @@ def _predict_with_confidence(df: pd.DataFrame) -> List[Dict[str, Any]]:
 						# Convert variance to confidence score (lower variance = higher confidence)
 						# Normalize by mean to get relative variance
 						relative_variance = variance / (mean_value ** 2) if mean_value > 0 else 1.0
-						knn_confidence = max(0, 1 - relative_variance)
+						# FIXED: Cap confidence at reasonable levels and use better scaling
+						# This prevents unrealistic confidence scores and provides better variance handling
+						knn_confidence = max(0.1, min(0.9, 1.0 - min(relative_variance, 1.0)))
 						
 						confidence_info["knn_variance"] = float(variance)
 						confidence_info["knn_confidence"] = float(knn_confidence)
@@ -519,6 +551,15 @@ def _predict_with_confidence(df: pd.DataFrame) -> List[Dict[str, Any]]:
 						if SETTINGS.confidence_method == "knn_variance":
 							confidence_info["confidence_score"] = knn_confidence
 							confidence_info["confidence_type"] = "knn_variance"
+						
+						# Add debugging info for KNN method
+						if SETTINGS.log_json:
+							confidence_info["debug"] = {
+								"variance": float(variance),
+								"mean_value": float(mean_value),
+								"relative_variance": float(relative_variance),
+								"knn_confidence": float(knn_confidence)
+							}
 			
 			if SETTINGS.confidence_method in ["feature_distance", "hybrid"] and TRAINING_DATA is not None:
 				# Feature distance confidence
@@ -532,23 +573,29 @@ def _predict_with_confidence(df: pd.DataFrame) -> List[Dict[str, Any]]:
 				if SETTINGS.confidence_method == "feature_distance":
 					confidence_info["confidence_score"] = feature_confidence
 					confidence_info["confidence_type"] = "feature_distance"
+					
+					# Add debugging info for feature distance method
+					if SETTINGS.log_json:
+						confidence_info["debug"] = {
+							"feature_confidence": float(feature_confidence),
+							"feature_novelty": float(novelty)
+						}
 				elif SETTINGS.confidence_method == "hybrid":
-					# Combine confidence measures
-					quantile_confidence = confidence_info.get("confidence_score", 0.5)
-					feature_confidence = confidence_info.get("confidence_score", feature_confidence)
+					# Combine confidence measures - FIXED LOGIC
+					quantile_confidence = confidence_info.get("quantile_confidence", 0.5)
 					knn_confidence = confidence_info.get("knn_confidence", 0.5)
 					
 					# Weight the different confidence measures
 					weights = []
 					confidences = []
 					
-					if "quantile" in confidence_info.get("confidence_type", ""):
+					if "quantile_confidence" in confidence_info:
 						weights.append(0.4)
 						confidences.append(quantile_confidence)
-					if "knn_variance" in confidence_info.get("confidence_type", ""):
+					if "knn_confidence" in confidence_info:
 						weights.append(0.3)
 						confidences.append(knn_confidence)
-					if "feature_distance" in confidence_info.get("confidence_type", ""):
+					if "feature_novelty" in confidence_info:
 						weights.append(0.3)
 						confidences.append(feature_confidence)
 					
@@ -556,7 +603,20 @@ def _predict_with_confidence(df: pd.DataFrame) -> List[Dict[str, Any]]:
 						# Normalize weights
 						total_weight = sum(weights)
 						weights = [w / total_weight for w in weights]
-						confidence_info["confidence_score"] = sum(w * c for w, c in zip(weights, confidences))
+						# FIXED: Cap final confidence at reasonable levels
+						# This prevents the hybrid method from producing unrealistic confidence scores
+						hybrid_confidence = sum(w * c for w, c in zip(weights, confidences))
+						confidence_info["confidence_score"] = max(0.1, min(0.9, hybrid_confidence))
+						
+						# Add debugging info for hybrid method
+						confidence_info["debug"] = {
+							"quantile_confidence": quantile_confidence,
+							"knn_confidence": knn_confidence,
+							"feature_confidence": feature_confidence,
+							"weights": weights,
+							"raw_hybrid": hybrid_confidence,
+							"final_confidence": confidence_info["confidence_score"]
+						}
 					else:
 						confidence_info["confidence_score"] = 0.5
 					
@@ -566,6 +626,18 @@ def _predict_with_confidence(df: pd.DataFrame) -> List[Dict[str, Any]]:
 			"prediction": float(pred),
 			**confidence_info
 		})
+		
+		# Add overall debugging info
+		if SETTINGS.log_json:
+			LOGGER.info("prediction_confidence_summary", extra={
+				"prediction": float(pred),
+				"confidence_score": confidence_info.get("confidence_score", 0.0),
+				"confidence_type": confidence_info.get("confidence_type", "none"),
+				"feature_novelty": confidence_info.get("feature_novelty", 0.0),
+				"has_quantile": "quantile_confidence" in confidence_info,
+				"has_knn": "knn_confidence" in confidence_info,
+				"has_feature": "feature_novelty" in confidence_info
+			})
 	
 	return predictions
 
@@ -600,16 +672,42 @@ def calculate_feature_distance(input_features: np.ndarray, training_data: np.nda
 	# Avoid division by zero
 	training_std = np.where(training_std == 0, 1.0, training_std)
 	
-	# Ensure distances and training_std have compatible shapes
-	# distances[0] has shape (n_samples,) and training_std has shape (n_features,)
-	# We need to broadcast them properly
+	# FIXED: Better distance normalization logic
+	# The previous calculation was dividing distances by mean(std) which created very large numbers
+	# Now we calculate mean(distance) / mean(std) which gives more reasonable novelty scores
 	distances_flat = distances.flatten()
-	normalized_distance = np.mean(distances_flat / np.mean(training_std))
+	mean_distance = np.mean(distances_flat)
+	mean_feature_std = np.mean(training_std)
+	
+	# Normalize distance by feature scale - this gives us a more reasonable novelty score
+	# Lower values = more similar to training data, higher values = more novel
+	# Expected range: 0.1-5.0 for similar houses, 5.0-20.0 for unusual houses
+	# NOTE: Houses in future_unseen_examples.csv are intentionally different from training data
+	# High novelty scores (10+) are expected and correct - they indicate the model is working properly
+	normalized_distance = mean_distance / mean_feature_std if mean_feature_std > 0 else mean_distance
 	
 	# Convert to confidence score (0=very similar, 1=very novel)
-	# Use exponential decay: confidence = exp(-distance/scale_factor)
+	# Use better scaling and cap at reasonable levels
 	scale_factor = SETTINGS.feature_distance_threshold
-	confidence_score = np.exp(-normalized_distance / scale_factor)
+	
+	# Convert distance to confidence: lower distance = higher confidence
+	# Use sigmoid-like function for better scaling
+	confidence_score = 1.0 / (1.0 + normalized_distance / scale_factor)
+	
+	# FIXED: Cap confidence at reasonable levels (10% to 90%)
+	# This prevents unrealistic confidence scores and provides better distance scaling
+	confidence_score = max(0.1, min(0.9, confidence_score))
+	
+	# Add some debugging info
+	if SETTINGS.log_json:
+		LOGGER.info("feature_distance_calculation", extra={
+			"mean_distance": float(mean_distance),
+			"mean_feature_std": float(mean_feature_std),
+			"normalized_distance": float(normalized_distance),
+			"scale_factor": float(scale_factor),
+			"raw_confidence": float(1.0 / (1.0 + normalized_distance / scale_factor)),
+			"final_confidence": float(confidence_score)
+		})
 	
 	return float(confidence_score), float(normalized_distance)
 
